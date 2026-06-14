@@ -2,11 +2,11 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
-import plotly.express as px
 from plotly.subplots import make_subplots
 
 from var_engine import VaREngine
 from stress_testing import StressTester, SCENARIOS
+from real_data import load_portfolio_returns, portfolio_summary
 
 # ------------------------------------------------------------------
 # Page config
@@ -18,15 +18,27 @@ st.set_page_config(
 )
 
 st.title("Risk Management Dashboard")
-st.caption("Value at Risk & Stress Testing Suite — three VaR methods, five historical crisis scenarios")
+st.caption(
+    "Value at Risk & Stress Testing Suite — three VaR methods, "
+    "five historical crisis scenarios, real European market data"
+)
 
 # ------------------------------------------------------------------
-# Sidebar — portfolio parameters
+# Sidebar — data source
 # ------------------------------------------------------------------
+st.sidebar.header("Data Source")
+
+data_mode = st.sidebar.radio(
+    "Return Series",
+    options=["Real Data (European Portfolio)", "Synthetic"],
+    index=0,
+)
+
+st.sidebar.markdown("---")
 st.sidebar.header("Portfolio Parameters")
 
 portfolio_value = st.sidebar.number_input(
-    "Portfolio Value ($)", min_value=10_000, max_value=100_000_000,
+    "Portfolio Value (€)", min_value=10_000, max_value=100_000_000,
     value=1_000_000, step=10_000, format="%d"
 )
 
@@ -39,39 +51,62 @@ horizon = st.sidebar.selectbox(
     "Horizon (days)", options=[1, 5, 10, 21], index=0
 )
 
-beta = st.sidebar.slider("Portfolio Beta (vs S&P 500)", 0.0, 2.5, 1.0, 0.1)
-
-st.sidebar.markdown("---")
-st.sidebar.header("Return Parameters")
-annual_return = st.sidebar.slider("Annual Return (%)", -20.0, 50.0, 10.0, 0.5)
-annual_vol = st.sidebar.slider("Annual Volatility (%)", 5.0, 80.0, 20.0, 0.5)
+beta = st.sidebar.slider("Portfolio Beta (vs Euro Stoxx 50)", 0.0, 2.5, 1.0, 0.1)
 
 # ------------------------------------------------------------------
-# Generate synthetic returns from parameters
+# Load returns
 # ------------------------------------------------------------------
-np.random.seed(42)
-daily_mu = annual_return / 100 / 252
-daily_sigma = annual_vol / 100 / np.sqrt(252)
-n_days = 1260  # 5 years
+if data_mode == "Real Data (European Portfolio)":
+    with st.spinner("Loading market data..."):
+        returns, meta = load_portfolio_returns(prefer_live=True)
 
-raw = np.random.normal(daily_mu, daily_sigma, n_days)
-# Add fat tails via Student-t mixture
-t_shocks = np.random.standard_t(df=4, size=n_days) * daily_sigma * 0.3
-returns = pd.Series(raw + t_shocks * (np.random.rand(n_days) < 0.05))
+    # Portfolio info banner
+    source_label = "Live (yfinance)" if meta.source == "live" else "Embedded historical (2020–2024)"
+    col_i1, col_i2, col_i3, col_i4 = st.columns(4)
+    col_i1.metric("Data Source", source_label)
+    col_i2.metric("Annual Return", f"{meta.annual_return:.1f}%")
+    col_i3.metric("Annual Vol", f"{meta.annual_vol:.1f}%")
+    col_i4.metric("Max Drawdown", f"{meta.max_drawdown:.1f}%")
+
+    with st.expander("Portfolio Constituents — Equal-Weight European Large-Cap"):
+        st.dataframe(portfolio_summary(), use_container_width=True, hide_index=True)
+        st.caption(
+            f"Period: {meta.start} → {meta.end} · {meta.n_obs} trading days · "
+            f"Sharpe: {meta.sharpe:.2f}"
+        )
+
+else:
+    # Synthetic path (original behaviour)
+    st.sidebar.markdown("---")
+    st.sidebar.header("Return Parameters")
+    annual_return = st.sidebar.slider("Annual Return (%)", -20.0, 50.0, 10.0, 0.5)
+    annual_vol    = st.sidebar.slider("Annual Volatility (%)", 5.0, 80.0, 20.0, 0.5)
+
+    np.random.seed(42)
+    daily_mu    = annual_return / 100 / 252
+    daily_sigma = annual_vol / 100 / np.sqrt(252)
+    n_days = 1260
+    raw  = np.random.normal(daily_mu, daily_sigma, n_days)
+    t_sh = np.random.standard_t(df=4, size=n_days) * daily_sigma * 0.3
+    returns = pd.Series(
+        raw + t_sh * (np.random.rand(n_days) < 0.05),
+        index=pd.bdate_range(end="2024-12-31", periods=n_days),
+    )
+    st.info("Using synthetic returns. Switch to **Real Data** for live European market data.")
 
 # ------------------------------------------------------------------
 # VaR computation
 # ------------------------------------------------------------------
 engine = VaREngine(returns, portfolio_value)
 
-hist = engine.historical_var(confidence, horizon)
+hist  = engine.historical_var(confidence, horizon)
 param = engine.parametric_var(confidence, horizon)
-mc = engine.monte_carlo_var(confidence, horizon)
+mc    = engine.monte_carlo_var(confidence, horizon)
 
 results_df = engine.all_methods(confidence, horizon)
 
 # ------------------------------------------------------------------
-# Layout — row 1: KPI cards
+# Row 1: KPI cards
 # ------------------------------------------------------------------
 st.subheader("VaR Summary")
 
@@ -80,29 +115,29 @@ col1, col2, col3 = st.columns(3)
 with col1:
     st.metric(
         label=f"Historical VaR ({confidence:.0%}, {horizon}d)",
-        value=f"${hist.var:,.0f}",
+        value=f"€{hist.var:,.0f}",
         delta=f"{hist.var_pct:.2f}% of portfolio",
         delta_color="inverse",
     )
-    st.caption(f"CVaR (Expected Shortfall): ${hist.cvar:,.0f}")
+    st.caption(f"CVaR / Expected Shortfall: €{hist.cvar:,.0f}")
 
 with col2:
     st.metric(
         label=f"Parametric VaR ({confidence:.0%}, {horizon}d)",
-        value=f"${param.var:,.0f}",
+        value=f"€{param.var:,.0f}",
         delta=f"{param.var_pct:.2f}% of portfolio",
         delta_color="inverse",
     )
-    st.caption(f"CVaR (Expected Shortfall): ${param.cvar:,.0f}")
+    st.caption(f"CVaR / Expected Shortfall: €{param.cvar:,.0f}")
 
 with col3:
     st.metric(
         label=f"Monte Carlo VaR ({confidence:.0%}, {horizon}d)",
-        value=f"${mc.var:,.0f}",
+        value=f"€{mc.var:,.0f}",
         delta=f"{mc.var_pct:.2f}% of portfolio",
         delta_color="inverse",
     )
-    st.caption(f"CVaR (Expected Shortfall): ${mc.cvar:,.0f}")
+    st.caption(f"CVaR / Expected Shortfall: €{mc.cvar:,.0f}")
 
 # ------------------------------------------------------------------
 # Row 2: return distribution + VaR lines
@@ -113,21 +148,21 @@ fig = go.Figure()
 
 hist_returns = returns * np.sqrt(horizon)
 counts, bins = np.histogram(hist_returns, bins=80)
-bin_centers = (bins[:-1] + bins[1:]) / 2
+bin_centers  = (bins[:-1] + bins[1:]) / 2
 
 fig.add_trace(go.Bar(
     x=bin_centers * 100,
     y=counts,
-    name="Simulated Returns",
+    name="Portfolio Returns",
     marker_color="#334155",
     opacity=0.8,
 ))
 
 colors = {"Historical": "#3b82f6", "Parametric": "#f59e0b", "Monte Carlo": "#10b981"}
 var_values = {
-    "Historical": -hist.var_pct,
-    "Parametric": -param.var_pct,
-    "Monte Carlo": -mc.var_pct,
+    "Historical":   -hist.var_pct,
+    "Parametric":   -param.var_pct,
+    "Monte Carlo":  -mc.var_pct,
 }
 
 for label, val in var_values.items():
@@ -151,17 +186,61 @@ fig.update_layout(
 st.plotly_chart(fig, use_container_width=True)
 
 # ------------------------------------------------------------------
-# Row 3: method comparison table
+# Row 3: cumulative return (real data only)
+# ------------------------------------------------------------------
+if data_mode == "Real Data (European Portfolio)":
+    st.subheader("Cumulative Portfolio Return (2020–2024)")
+
+    cum_returns = (1 + returns).cumprod() - 1
+
+    fig_cum = go.Figure()
+    fig_cum.add_trace(go.Scatter(
+        x=cum_returns.index,
+        y=cum_returns * 100,
+        mode="lines",
+        line=dict(color="#10b981", width=1.5),
+        fill="tozeroy",
+        fillcolor="rgba(16,185,129,0.08)",
+        name="Cumulative Return",
+    ))
+
+    # Shade COVID crash
+    fig_cum.add_vrect(
+        x0="2020-02-20", x1="2020-03-23",
+        fillcolor="rgba(239,68,68,0.15)",
+        line_width=0,
+        annotation_text="COVID",
+        annotation_position="top left",
+    )
+    # Shade 2022 rate shock
+    fig_cum.add_vrect(
+        x0="2022-01-01", x1="2022-10-31",
+        fillcolor="rgba(251,146,60,0.12)",
+        line_width=0,
+        annotation_text="Rate shock",
+        annotation_position="top left",
+    )
+
+    fig_cum.update_layout(
+        yaxis_title="Cumulative Return (%)",
+        template="plotly_dark",
+        height=300,
+        margin=dict(l=40, r=40, t=20, b=40),
+    )
+    st.plotly_chart(fig_cum, use_container_width=True)
+
+# ------------------------------------------------------------------
+# Row 4: method comparison table
 # ------------------------------------------------------------------
 st.subheader("Method Comparison")
 st.dataframe(results_df, use_container_width=True, hide_index=True)
 
 # ------------------------------------------------------------------
-# Row 4: stress testing
+# Row 5: stress testing
 # ------------------------------------------------------------------
 st.subheader("Historical Stress Scenarios")
 
-tester = StressTester(portfolio_value, beta)
+tester   = StressTester(portfolio_value, beta)
 stress_df = tester.run_all()
 
 col_left, col_right = st.columns([1.2, 1])
@@ -171,7 +250,7 @@ with col_left:
 
 with col_right:
     losses = []
-    names = []
+    names  = []
     for name in SCENARIOS:
         r = tester.run_scenario(name)
         losses.append(abs(r.portfolio_loss))
@@ -182,11 +261,11 @@ with col_right:
         y=names,
         orientation="h",
         marker_color=["#ef4444", "#f97316", "#eab308", "#84cc16", "#3b82f6"],
-        text=[f"${l:,.0f}" for l in losses],
+        text=[f"€{l:,.0f}" for l in losses],
         textposition="outside",
     ))
     fig2.update_layout(
-        xaxis_title="Estimated Loss ($)",
+        xaxis_title="Estimated Loss (€)",
         template="plotly_dark",
         height=320,
         margin=dict(l=10, r=80, t=20, b=40),
@@ -195,22 +274,21 @@ with col_right:
     st.plotly_chart(fig2, use_container_width=True)
 
 # ------------------------------------------------------------------
-# Row 5: rolling VaR over time
+# Row 6: rolling VaR
 # ------------------------------------------------------------------
 st.subheader("Rolling 1-Year Historical VaR (95%)")
 
 window = 252
 rolling_var = []
-dates = pd.date_range(end="2025-12-31", periods=len(returns), freq="B")
 
 for i in range(window, len(returns)):
-    window_returns = returns.iloc[i-window:i]
-    v = -np.percentile(window_returns, 5) * portfolio_value
+    w_ret = returns.iloc[i - window:i]
+    v = -np.percentile(w_ret, 5) * portfolio_value
     rolling_var.append(v)
 
 fig3 = go.Figure()
 fig3.add_trace(go.Scatter(
-    x=dates[window:],
+    x=returns.index[window:],
     y=rolling_var,
     mode="lines",
     line=dict(color="#3b82f6", width=1.5),
@@ -219,7 +297,7 @@ fig3.add_trace(go.Scatter(
     fillcolor="rgba(59,130,246,0.1)",
 ))
 fig3.update_layout(
-    yaxis_title="1-day VaR ($)",
+    yaxis_title="1-day VaR (€)",
     template="plotly_dark",
     height=300,
     margin=dict(l=40, r=40, t=20, b=40),
@@ -227,7 +305,7 @@ fig3.update_layout(
 st.plotly_chart(fig3, use_container_width=True)
 
 st.caption(
-    "Returns generated via normal distribution with Student-t tail mixture. "
-    "Stress scenario losses scaled by portfolio beta vs S&P 500. "
-    "CVaR = Expected Shortfall beyond VaR threshold."
+    "Real data: equal-weight portfolio of BNP Paribas, TotalEnergies, ASML, Siemens, Airbus. "
+    "CVaR = Expected Shortfall beyond VaR threshold (Basel III standard). "
+    "Stress losses scaled by portfolio beta vs Euro Stoxx 50."
 )
